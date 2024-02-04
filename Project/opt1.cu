@@ -2,7 +2,7 @@
 #include <iostream>
 #include "gpu-new-forward.h"
 
-#define TILE_WIDTH 8
+#define TILE_WIDTH 16
 #define H_out ((H - K)/S + 1)
 #define W_out ((W - K)/S + 1)
 #define H_grid ((int)ceil(1.0 * H_out / TILE_WIDTH))
@@ -28,10 +28,10 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
     S - stride step length
     */
 
-    // const int H_out = (H - K)/S + 1;
-    // const int W_out = (W - K)/S + 1;
-    // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
-    // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
+    extern __shared__ float shared_mem[];
+    float* shared_tile = &shared_mem[0];
+
+    int BLOCK_WIDTH = TILE_WIDTH + K -1;
 
     // We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
     // An example use of these macros:
@@ -43,25 +43,36 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
     #define mask_4d(i3, i2, i1, i0) mask[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
     // Insert your GPU convolution kernel code here
-    // int W_size = (W + TILE_WIDTH - 1) / TILE_WIDTH;
-
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
     int m = blockIdx.x;
+    int h = (blockIdx.y / W_grid) * TILE_WIDTH + ty;
+    int w = (blockIdx.y % W_grid) * TILE_WIDTH + tx;
     int b = blockIdx.z;
-    int h = (blockIdx.y / W_grid) * TILE_WIDTH + threadIdx.y;
-    int w = (blockIdx.y % W_grid) * TILE_WIDTH + threadIdx.x;
-    
-    float acc = 0.0f;
-    for(int c = 0; c < C; c++){
-        for(int p = 0; p < K; p++){
-            for(int q = 0; q < K; q++){
-                acc += in_4d(b, c, h * S + p, w * S + q) * mask_4d(m, c, p, q);
-            }
-        }
-    }
 
-    if(h < H_out && w < W_out){
-        out_4d(b, m, h, w) = acc;
-    }
+    int share_index = tx + ty * BLOCK_WIDTH;
+    float acc = 0.0f;
+        for (int c = 0; c < C; c++) { // sum over all input channels
+            if (h < H && w < W) {
+                shared_tile[share_index] = in_4d(b, c, h, w);
+            }
+            else {
+                shared_tile[share_index] = 0.0f;
+            }
+            __syncthreads (); // wait for tile
+            if (h < H_out && w < W_out) {
+                for (int p = 0; p < K; p++) {// loop over KxK filter 
+                    for (int q = 0; q < K; q++) {
+                        acc += in_4d(b, c, h * S + p, w * S + q) * mask_4d(m, c, p, q);
+                    }
+                }
+            }
+            __syncthreads ();
+        }
+
+        if (h < H_out && w < W_out){
+            out_4d(b, m, h, w) = acc;
+        }
 
     #undef out_4d
     #undef in_4d
@@ -72,7 +83,17 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
 __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, const float *host_input, const float *host_mask, float **device_output_ptr, float **device_input_ptr, float **device_mask_ptr, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
     // Allocate memory and copy over the relevant data structures to the GPU
+    int output_size = B * M * H_out * W_out;
+    int input_size = B * C * H * W;
+    int mask_size = M * C * K * K;
 
+    cudaMalloc((void **)device_input_ptr, input_size * sizeof(float));
+    cudaMalloc((void **)device_output_ptr, output_size * sizeof(float));
+    cudaMalloc((void **)device_mask_ptr, mask_size * sizeof(float));
+
+    cudaMemcpy(*device_input_ptr, host_input, input_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(*device_mask_ptr, host_mask, mask_size * sizeof(float), cudaMemcpyHostToDevice);
+    
     // We pass double pointers for you to initialize the relevant device pointers,
     //  which are passed to the other two functions.
 
@@ -83,50 +104,30 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
     //     std::cout<<"CUDA error: "<<cudaGetErrorString(error)<<std::endl;
     //     exit(-1);
     // }
-
-    // const int H_out = (H - K)/S + 1;
-    // const int W_out = (W - K)/S + 1;
-
-    int output_size = B * M * H_out * W_out;
-    int input_size = B * C * H * W;
-    int mask_size = M * C * K * K;
-
-    cudaMalloc((void **)device_input_ptr, input_size * sizeof(float));
-    cudaMalloc((void **)device_output_ptr, output_size * sizeof(float));
-    cudaMalloc((void **)device_mask_ptr, mask_size * sizeof(float));
-
-    cudaMemcpy(*device_input_ptr, host_input, input_size * sizeof(float), cudaMemcpyHostToDevice);
-    // cudaMemcpy(*device_output_ptr, host_output, output_size * sizeof(float), cudaMemcpyHostToDevice)
-    cudaMemcpy(*device_mask_ptr, host_mask, mask_size * sizeof(float), cudaMemcpyHostToDevice);
+   
 }
 
 
 __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *device_input, const float *device_mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
     // Set the kernel dimensions and call the kernel
-    // int W_size = (W + TILE_WIDTH - 1) / TILE_WIDTH; // number of horizontal tiles per output map
-    // int H_size = (H + TILE_WIDTH - 1) / TILE_WIDTH; // number of vertical tiles per output map
-    int Y = H_grid * W_grid; // total number of tiles per map
-
-    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
+    int BLOCK_WIDTH = TILE_WIDTH +K -1;
+    int Y = H_grid * W_grid;
     dim3 gridDim(M, Y, B);
-    conv_forward_kernel<<<gridDim, blockDim>>>(device_output, device_input, device_mask, B, M, C, H, W, K, S);
+    dim3 blockDim(BLOCK_WIDTH, BLOCK_WIDTH, 1);
+    conv_forward_kernel<<<gridDim, blockDim, BLOCK_WIDTH * BLOCK_WIDTH * sizeof(float)>>>(device_output, device_input, device_mask, B, M, C, H, W, K, S);
 }
 
 
 __host__ void GPUInterface::conv_forward_gpu_epilog(float *host_output, float *device_output, float *device_input, float *device_mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
     // Copy the output back to host
-    // const int H_out = (H - K)/S + 1;
-    // const int W_out = (W - K)/S + 1;
-    int output_size = B * M * H_out * W_out;
-
-    cudaMemcpy(host_output, device_output, output_size * sizeof(float), cudaMemcpyDeviceToHost);
-    
+    cudaMemcpy(host_output, device_output, B * (M * H_out * W_out)*sizeof(float), cudaMemcpyDeviceToHost);
     // Free device memory
-    cudaFree(device_input);
     cudaFree(device_output);
+    cudaFree(device_input);
     cudaFree(device_mask);
+
 }
 
 

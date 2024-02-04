@@ -2,11 +2,9 @@
 #include <iostream>
 #include "gpu-new-forward.h"
 
-#define TILE_WIDTH 8
-#define H_out ((H - K)/S + 1)
-#define W_out ((W - K)/S + 1)
-#define H_grid ((int)ceil(1.0 * H_out / TILE_WIDTH))
-#define W_grid ((int)ceil(1.0 * W_out / TILE_WIDTH))
+#define TILE_WIDTH 16
+
+__constant__ float const_mem[10000];
 
 __global__ void conv_forward_kernel(float *output, const float *input, const float *mask, const int B, const int M, const int C, const int H, const int W, const int K,const int S)
 {
@@ -28,8 +26,8 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
     S - stride step length
     */
 
-    // const int H_out = (H - K)/S + 1;
-    // const int W_out = (W - K)/S + 1;
+    const int H_out = (H - K)/S + 1;
+    const int W_out = (W - K)/S + 1;
     // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
     // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
 
@@ -40,16 +38,15 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
 
     #define out_4d(i3, i2, i1, i0) output[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
     #define in_4d(i3, i2, i1, i0) input[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-    #define mask_4d(i3, i2, i1, i0) mask[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    #define mask_4d(i3, i2, i1, i0) const_mem[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
     // Insert your GPU convolution kernel code here
-    // int W_size = (W + TILE_WIDTH - 1) / TILE_WIDTH;
+    int W_size = (W + TILE_WIDTH - 1) / TILE_WIDTH;
 
     int m = blockIdx.x;
     int b = blockIdx.z;
-    int h = (blockIdx.y / W_grid) * TILE_WIDTH + threadIdx.y;
-    int w = (blockIdx.y % W_grid) * TILE_WIDTH + threadIdx.x;
-    
+    int h = (blockIdx.y / W_size) * TILE_WIDTH + threadIdx.y;
+    int w = (blockIdx.y % W_size) * TILE_WIDTH + threadIdx.x;
     float acc = 0.0f;
     for(int c = 0; c < C; c++){
         for(int p = 0; p < K; p++){
@@ -84,8 +81,8 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
     //     exit(-1);
     // }
 
-    // const int H_out = (H - K)/S + 1;
-    // const int W_out = (W - K)/S + 1;
+    const int H_out = (H - K)/S + 1;
+    const int W_out = (W - K)/S + 1;
 
     int output_size = B * M * H_out * W_out;
     int input_size = B * C * H * W;
@@ -97,16 +94,19 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
 
     cudaMemcpy(*device_input_ptr, host_input, input_size * sizeof(float), cudaMemcpyHostToDevice);
     // cudaMemcpy(*device_output_ptr, host_output, output_size * sizeof(float), cudaMemcpyHostToDevice)
-    cudaMemcpy(*device_mask_ptr, host_mask, mask_size * sizeof(float), cudaMemcpyHostToDevice);
+    
+    cudaMemcpyToSymbol(const_mem, host_mask, mask_size * sizeof(float));
+
+    // cudaMemcpy(*device_mask_ptr, host_mask, mask_size * sizeof(float), cudaMemcpyHostToDevice);
 }
 
 
 __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *device_input, const float *device_mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
     // Set the kernel dimensions and call the kernel
-    // int W_size = (W + TILE_WIDTH - 1) / TILE_WIDTH; // number of horizontal tiles per output map
-    // int H_size = (H + TILE_WIDTH - 1) / TILE_WIDTH; // number of vertical tiles per output map
-    int Y = H_grid * W_grid; // total number of tiles per map
+    int W_size = (W + TILE_WIDTH - 1) / TILE_WIDTH; // number of horizontal tiles per output map
+    int H_size = (H + TILE_WIDTH - 1) / TILE_WIDTH; // number of vertical tiles per output map
+    int Y = H_size * W_size; // total number of tiles per map
 
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
     dim3 gridDim(M, Y, B);
@@ -117,8 +117,8 @@ __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *
 __host__ void GPUInterface::conv_forward_gpu_epilog(float *host_output, float *device_output, float *device_input, float *device_mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
     // Copy the output back to host
-    // const int H_out = (H - K)/S + 1;
-    // const int W_out = (W - K)/S + 1;
+    const int H_out = (H - K)/S + 1;
+    const int W_out = (W - K)/S + 1;
     int output_size = B * M * H_out * W_out;
 
     cudaMemcpy(host_output, device_output, output_size * sizeof(float), cudaMemcpyDeviceToHost);

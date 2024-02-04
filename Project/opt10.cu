@@ -1,12 +1,11 @@
 #include <cmath>
 #include <iostream>
 #include "gpu-new-forward.h"
+#include <cuda_fp16.h>
 
-#define TILE_WIDTH 8
+#define TILE_WIDTH 16
 #define H_out ((H - K)/S + 1)
 #define W_out ((W - K)/S + 1)
-#define H_grid ((int)ceil(1.0 * H_out / TILE_WIDTH))
-#define W_grid ((int)ceil(1.0 * W_out / TILE_WIDTH))
 
 __global__ void conv_forward_kernel(float *output, const float *input, const float *mask, const int B, const int M, const int C, const int H, const int W, const int K,const int S)
 {
@@ -44,23 +43,23 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
 
     // Insert your GPU convolution kernel code here
     // int W_size = (W + TILE_WIDTH - 1) / TILE_WIDTH;
-
+    int W_grid = ceil(1.0 * W / TILE_WIDTH);
     int m = blockIdx.x;
     int b = blockIdx.z;
     int h = (blockIdx.y / W_grid) * TILE_WIDTH + threadIdx.y;
     int w = (blockIdx.y % W_grid) * TILE_WIDTH + threadIdx.x;
-    
-    float acc = 0.0f;
+
+    half2 acc = __float2half2_rn(0.0f);
     for(int c = 0; c < C; c++){
         for(int p = 0; p < K; p++){
             for(int q = 0; q < K; q++){
-                acc += in_4d(b, c, h * S + p, w * S + q) * mask_4d(m, c, p, q);
+                acc = __hadd2(__hmul2(__float2half2_rn(in_4d(b, c, h * S + p, w * S + q)), __float2half2_rn(mask_4d(m, c, p, q))), acc);
             }
         }
     }
 
     if(h < H_out && w < W_out){
-        out_4d(b, m, h, w) = acc;
+        out_4d(b, m, h, w) = __low2float(acc);
     }
 
     #undef out_4d
@@ -71,22 +70,6 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
 	
 __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, const float *host_input, const float *host_mask, float **device_output_ptr, float **device_input_ptr, float **device_mask_ptr, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
-    // Allocate memory and copy over the relevant data structures to the GPU
-
-    // We pass double pointers for you to initialize the relevant device pointers,
-    //  which are passed to the other two functions.
-
-    // Useful snippet for error checking
-    // cudaError_t error = cudaGetLastError();
-    // if(error != cudaSuccess)
-    // {
-    //     std::cout<<"CUDA error: "<<cudaGetErrorString(error)<<std::endl;
-    //     exit(-1);
-    // }
-
-    // const int H_out = (H - K)/S + 1;
-    // const int W_out = (W - K)/S + 1;
-
     int output_size = B * M * H_out * W_out;
     int input_size = B * C * H * W;
     int mask_size = M * C * K * K;
@@ -104,9 +87,9 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
 __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *device_input, const float *device_mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
     // Set the kernel dimensions and call the kernel
-    // int W_size = (W + TILE_WIDTH - 1) / TILE_WIDTH; // number of horizontal tiles per output map
-    // int H_size = (H + TILE_WIDTH - 1) / TILE_WIDTH; // number of vertical tiles per output map
-    int Y = H_grid * W_grid; // total number of tiles per map
+    int W_size = (W + TILE_WIDTH - 1) / TILE_WIDTH; // number of horizontal tiles per output map
+    int H_size = (H + TILE_WIDTH - 1) / TILE_WIDTH; // number of vertical tiles per output map
+    int Y = H_size * W_size; // total number of tiles per map
 
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
     dim3 gridDim(M, Y, B);
@@ -117,8 +100,6 @@ __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *
 __host__ void GPUInterface::conv_forward_gpu_epilog(float *host_output, float *device_output, float *device_input, float *device_mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
     // Copy the output back to host
-    // const int H_out = (H - K)/S + 1;
-    // const int W_out = (W - K)/S + 1;
     int output_size = B * M * H_out * W_out;
 
     cudaMemcpy(host_output, device_output, output_size * sizeof(float), cudaMemcpyDeviceToHost);

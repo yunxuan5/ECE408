@@ -2,7 +2,7 @@
 #include <iostream>
 #include "gpu-new-forward.h"
 
-#define TILE_WIDTH 8
+#define TILE_WIDTH 16
 #define H_out ((H - K)/S + 1)
 #define W_out ((W - K)/S + 1)
 #define H_grid ((int)ceil(1.0 * H_out / TILE_WIDTH))

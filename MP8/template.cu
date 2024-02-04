@@ -1,5 +1,7 @@
 #include <wb.h>
 
+#define BLOCK_SIZE  512
+
 #define wbCheck(stmt)                                                     \
   do {                                                                    \
     cudaError_t err = stmt;                                               \
@@ -14,13 +16,32 @@ __global__ void spmvJDSKernel(float *out, int *matColStart, int *matCols,
                               int *matRowPerm, int *matRows,
                               float *matData, float *vec, int dim) {
   //@@ insert spmv kernel for jds format
+  int row = blockIdx.x * blockDim.x + threadIdx.x;
+  int index;
+  int row_start;
+
+  if(row < dim){
+    float dot = 0.0f;
+    // int row_start = matColStart[row];
+    int num_row_element = matRows[row];
+
+    for(int i = 0; i < num_row_element; i++){
+      row_start = matColStart[i]; // starting index of the row
+      index = row_start + row;  // row element index
+      dot += matData[index] * vec[matCols[index]];
+    }
+
+    out[matRowPerm[row]] = dot; // matRowPerm[row] get the origin row index to store data
+  }
 }
 
 static void spmvJDS(float *out, int *matColStart, int *matCols,
                     int *matRowPerm, int *matRows, float *matData,
                     float *vec, int dim) {
-
   //@@ invoke spmv kernel for jds format
+  dim3 dimGrid((dim - 1)/BLOCK_SIZE + 1, 1, 1);
+  dim3 dimBlock(BLOCK_SIZE, 1, 1);
+  spmvJDSKernel<<<dimGrid, dimBlock>>>(out, matColStart, matCols, matRowPerm, matRows, matData, vec, dim);
 }
 
 int main(int argc, char **argv) {

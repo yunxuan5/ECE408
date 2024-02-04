@@ -2,7 +2,7 @@
 #include <iostream>
 #include "gpu-new-forward.h"
 
-#define TILE_WIDTH 8
+#define TILE_WIDTH 16
 #define H_out ((H - K)/S + 1)
 #define W_out ((W - K)/S + 1)
 #define H_grid ((int)ceil(1.0 * H_out / TILE_WIDTH))
@@ -28,11 +28,6 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
     S - stride step length
     */
 
-    // const int H_out = (H - K)/S + 1;
-    // const int W_out = (W - K)/S + 1;
-    // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
-    // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
-
     // We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
     // An example use of these macros:
     // float a = in_4d(0,0,0,0)
@@ -51,10 +46,19 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
     int w = (blockIdx.y % W_grid) * TILE_WIDTH + threadIdx.x;
     
     float acc = 0.0f;
-    for(int c = 0; c < C; c++){
-        for(int p = 0; p < K; p++){
-            for(int q = 0; q < K; q++){
+    for(int c = 0; c < C; c++) {
+        for (int p = 0; p < K; p += 2) {
+            for (int q = 0; q < K; q += 2) {
                 acc += in_4d(b, c, h * S + p, w * S + q) * mask_4d(m, c, p, q);
+                if (q + 1 < K) {
+                    acc += in_4d(b, c, h * S + p, w * S + q + 1) * mask_4d(m, c, p, q + 1);
+                }
+                if (p + 1 < K) {
+                    acc += in_4d(b, c, h * S + p + 1, w * S + q) * mask_4d(m, c, p + 1, q);
+                    if (q + 1 < K) {
+                        acc += in_4d(b, c, h * S + p + 1, w * S + q + 1) * mask_4d(m, c, p + 1, q + 1);
+                    }
+                }
             }
         }
     }
@@ -83,9 +87,6 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
     //     std::cout<<"CUDA error: "<<cudaGetErrorString(error)<<std::endl;
     //     exit(-1);
     // }
-
-    // const int H_out = (H - K)/S + 1;
-    // const int W_out = (W - K)/S + 1;
 
     int output_size = B * M * H_out * W_out;
     int input_size = B * C * H * W;
